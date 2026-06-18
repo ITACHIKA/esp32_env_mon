@@ -30,9 +30,9 @@ bool fault_flag = false;
 bool need_reset = true;
 static uint8_t fail_cnt = 0;
 
-static char *mqtt_co2_topic;
-static char *mqtt_atemp_topic;
-static char *mqtt_rh_topic;
+static char *mqtt_co2_scd40_topic;
+static char *mqtt_atemp_scd40_topic;
+static char *mqtt_rh_scd40_topic;
 static char *mqtt_battlvl_topic;
 static char *mqtt_battraw_topic;
 
@@ -132,17 +132,17 @@ void scd_read_data(void *pvParameters)
                 if (co2_crc_res)
                 {
                     snprintf(result, sizeof(result), "{\"co2\":%u}", co2_ppm);
-                    mqtt_publish(mqtt_co2_topic, result);
+                    mqtt_publish(mqtt_co2_scd40_topic, result);
                 }
                 if (temp_crc_res)
                 {
                     snprintf(result, sizeof(result), "{\"atemp\":%.2f}", amb_temp);
-                    mqtt_publish(mqtt_atemp_topic, result);
+                    mqtt_publish(mqtt_atemp_scd40_topic, result);
                 }
                 if (rh_crc_res)
                 {
                     snprintf(result, sizeof(result), "{\"rh\":%.2f}", rel_humi);
-                    mqtt_publish(mqtt_rh_topic, result);
+                    mqtt_publish(mqtt_rh_scd40_topic, result);
                 }
             }
         }
@@ -173,14 +173,14 @@ void app_main(void)
     mqtt_init();
     start_webserver();
     // put user code here
-    mqtt_co2_topic = calloc(1, 128);
-    mqtt_rh_topic = calloc(1, 128);
-    mqtt_atemp_topic = calloc(1, 128);
+    mqtt_co2_scd40_topic = calloc(1, 128);
+    mqtt_rh_scd40_topic = calloc(1, 128);
+    mqtt_atemp_scd40_topic = calloc(1, 128);
     mqtt_battlvl_topic = calloc(1, 128);
     mqtt_battraw_topic = calloc(1, 128);
-    snprintf(mqtt_co2_topic, 128, "sensor/%s/co2", devName);
-    snprintf(mqtt_rh_topic, 128, "sensor/%s/rh", devName);
-    snprintf(mqtt_atemp_topic, 128, "sensor/%s/atemp", devName);
+    snprintf(mqtt_co2_scd40_topic, 128, "sensor/%s/co2", devName);
+    snprintf(mqtt_rh_scd40_topic, 128, "sensor/%s/rh", devName);
+    snprintf(mqtt_atemp_scd40_topic, 128, "sensor/%s/atemp", devName);
     snprintf(mqtt_battlvl_topic,128,"sensor/%s/battlvl",devName);
     snprintf(mqtt_battraw_topic,128,"sensor/%s/battraw",devName);
     i2c_config_t conf = {
