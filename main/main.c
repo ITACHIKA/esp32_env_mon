@@ -33,8 +33,28 @@ static uint8_t fail_cnt = 0;
 static char *mqtt_co2_scd40_topic;
 static char *mqtt_atemp_scd40_topic;
 static char *mqtt_rh_scd40_topic;
+static char *mqtt_atemp_sht40_topic;
+static char *mqtt_rh_sht40_topic;
 static char *mqtt_battlvl_topic;
 static char *mqtt_battraw_topic;
+
+static esp_err_t i2c_probe(i2c_port_t port, uint8_t addr)
+{
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (addr << 1) | I2C_MASTER_WRITE, true);
+    i2c_master_stop(cmd);
+
+    esp_err_t ret = i2c_master_cmd_begin(
+        port,
+        cmd,
+        pdMS_TO_TICKS(100));
+
+    i2c_cmd_link_delete(cmd);
+
+    return ret;
+}
 
 uint8_t sensirion_common_generate_crc(const uint8_t *data, uint16_t count)
 {
@@ -56,12 +76,17 @@ uint8_t sensirion_common_generate_crc(const uint8_t *data, uint16_t count)
     return crc;
 }
 
-static esp_err_t scd_write_command(uint8_t addr,uint16_t cmd)
+static esp_err_t scd_write_command_2byte(uint8_t addr,uint16_t cmd)
 {
     uint8_t send_seq[2];
     send_seq[0] = cmd >> 8;
     send_seq[1] = cmd;
     return i2c_master_write_to_device(I2C_MASTER_NUM, addr, send_seq, 2, pdMS_TO_TICKS(500));
+}
+
+static esp_err_t scd_write_command_byte(uint8_t addr,uint8_t cmd)
+{
+    return i2c_master_write_to_device(I2C_MASTER_NUM, addr, &cmd, 1, pdMS_TO_TICKS(500));
 }
 
 void scd_read_callback()
@@ -71,53 +96,88 @@ void scd_read_callback()
 
 void scd_read_data(void *pvParameters)
 {
+    static uint8_t counter = 0;
     for (;;)
     {
         char result[32];
         // ESP_LOGI(TAG,"scd read");
         uint8_t readBuffer[9] = {0};
-        uint8_t counter = 0;
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         if (fail_cnt == MAX_RETRIES_BEFORE_REBOOT)
         {
             // esp_restart();
-            ESP_LOGE(TAG, "SCD40 repetedly fail, please manually reset system power.");
+            ESP_LOGE(TAG, "I2C repetedly fail, please manually reset system power.");
             //xTimerStop(scdReadTimer,portMAX_DELAY);
             need_reset = true;
         }
         if (fault_flag && !need_reset)
         {
             fail_cnt++;
-            ESP_LOGE(TAG, "SCD40 error, now reinit");
-            scd_write_command(SCD40_I2C_ADDR, SCD40_STOP_PERIODIC); // stop periodic
+            ESP_LOGE(TAG, "I2C error, now reinit");
+            scd_write_command_2byte(SCD40_I2C_ADDR, SCD40_STOP_PERIODIC); // stop periodic
             vTaskDelay(pdMS_TO_TICKS(500));
-            scd_write_command(SCD40_I2C_ADDR, SCD40_REINIT); // reinit
+            scd_write_command_2byte(SCD40_I2C_ADDR, SCD40_REINIT); // reinit
             vTaskDelay(pdMS_TO_TICKS(30));
-            scd_write_command(SCD40_I2C_ADDR, SCD40_START_PERIODIC);
+            scd_write_command_2byte(SCD40_I2C_ADDR, SCD40_START_PERIODIC);
             xTimerReset(scdReadTimer, portMAX_DELAY);
             fault_flag = false;
             continue;
         }
         if (!fault_flag)
         {
+            esp_err_t ret;
+            //read SHT40
+            ret = scd_write_command_byte(SHT40_I2C_ADDR, SHT40_START_MEASUREMENT); // start measurement
+            if (ret != ESP_OK)
+            {
+                ESP_LOGE(TAG, "SHT40 Write error: %d", ret);
+                fault_flag = true;
+                continue;
+            }
+            vTaskDelay(pdMS_TO_TICKS(10));
+            ret = i2c_master_read_from_device(I2C_MASTER_NUM, SHT40_I2C_ADDR, readBuffer, 6, pdMS_TO_TICKS(200));
+            if (ret != ESP_OK)
+            {
+                ESP_LOGE(TAG, "SHT40 Read error: %d", ret);
+                fault_flag = true;
+                continue;
+            }
+            uint16_t atemp_raw_tick = ((uint16_t)readBuffer[0] << 8 | readBuffer[1]);
+            uint16_t rh_raw_tick = ((uint16_t)readBuffer[3] << 8 | readBuffer[4]);
+            uint8_t atemp_crc = readBuffer[2];
+            uint8_t rh_crc = readBuffer[5];
+            bool atemp_crc_res = (sensirion_common_generate_crc(&readBuffer[0], 2) == atemp_crc);
+            bool rh_crc_res = (sensirion_common_generate_crc(&readBuffer[3], 2) == rh_crc);
+            float atemp = -45.0f + 175.0f * ((float)atemp_raw_tick / 65535.0f);
+            float rh = -6.0f +125.0f * ((float)rh_raw_tick / 65535.0f);
+            // ESP_LOGI(TAG, "SHT40 read: atemp=%.2f, rh=%.2f", atemp, rh);
+            if (atemp_crc_res)
+            {
+                snprintf(result, sizeof(result), "{\"atemp\":%.2f}", atemp);
+                mqtt_publish(mqtt_atemp_sht40_topic, result);
+            }
+            if (rh_crc_res)
+            {
+                snprintf(result, sizeof(result), "{\"rh\":%.2f}", rh);
+                mqtt_publish(mqtt_rh_sht40_topic, result);
+            }
             //read SCD40
             ++counter;
             if(counter==5)
             {
                 counter = 0;
-                esp_err_t ret;
-                ret = scd_write_command(SCD40_I2C_ADDR, SCD40_READ_MEASUREMENT);
+                ret = scd_write_command_2byte(SCD40_I2C_ADDR, SCD40_READ_MEASUREMENT);
                 if (ret != ESP_OK)
                 {
-                    ESP_LOGE(TAG, "Write error: %d", ret);
+                    ESP_LOGE(TAG, "SCD40 Write error: %d", ret);
                     fault_flag = true;
                     continue;
                 }
                 vTaskDelay(pdMS_TO_TICKS(1)); // according to ds
-                ret = i2c_master_read_from_device(I2C_MASTER_NUM, SCD40_I2C_ADDR, readBuffer, 9, pdMS_TO_TICKS(500));
+                ret = i2c_master_read_from_device(I2C_MASTER_NUM, SCD40_I2C_ADDR, readBuffer, 9, pdMS_TO_TICKS(200));
                 if (ret != ESP_OK)
                 {
-                    ESP_LOGE(TAG, "Read error: %d", ret);
+                    ESP_LOGE(TAG, "SCD40 Read error: %d", ret);
                     fault_flag = true;
                     continue;
                 }
@@ -136,12 +196,12 @@ void scd_read_data(void *pvParameters)
                 }
                 if (temp_crc_res)
                 {
-                    snprintf(result, sizeof(result), "{\"atemp\":%.2f}", amb_temp);
+                    snprintf(result, sizeof(result), "{\"atemp_scd40\":%.2f}", amb_temp);
                     mqtt_publish(mqtt_atemp_scd40_topic, result);
                 }
                 if (rh_crc_res)
                 {
-                    snprintf(result, sizeof(result), "{\"rh\":%.2f}", rel_humi);
+                    snprintf(result, sizeof(result), "{\"rh_scd40\":%.2f}", rel_humi);
                     mqtt_publish(mqtt_rh_scd40_topic, result);
                 }
             }
@@ -178,9 +238,13 @@ void app_main(void)
     mqtt_atemp_scd40_topic = calloc(1, 128);
     mqtt_battlvl_topic = calloc(1, 128);
     mqtt_battraw_topic = calloc(1, 128);
+    mqtt_atemp_sht40_topic = calloc(1, 128);
+    mqtt_rh_sht40_topic = calloc(1, 128);    
     snprintf(mqtt_co2_scd40_topic, 128, "sensor/%s/co2", devName);
-    snprintf(mqtt_rh_scd40_topic, 128, "sensor/%s/rh", devName);
-    snprintf(mqtt_atemp_scd40_topic, 128, "sensor/%s/atemp", devName);
+    snprintf(mqtt_rh_scd40_topic, 128, "sensor/%s/rh_scd40", devName);
+    snprintf(mqtt_atemp_scd40_topic, 128, "sensor/%s/atemp_scd40", devName); // debug only
+    snprintf(mqtt_atemp_sht40_topic,128,"sensor/%s/atemp",devName);
+    snprintf(mqtt_rh_sht40_topic,128,"sensor/%s/rh",devName);// default use SHT40 measurement
     snprintf(mqtt_battlvl_topic,128,"sensor/%s/battlvl",devName);
     snprintf(mqtt_battraw_topic,128,"sensor/%s/battraw",devName);
     i2c_config_t conf = {
@@ -197,7 +261,12 @@ void app_main(void)
     scdReadTimer = xTimerCreate("scdReadTimer", pdMS_TO_TICKS(1000), pdTRUE, NULL, scd_read_callback);
     vTaskDelay(pdMS_TO_TICKS(1000)); // wait for SCD40 ready
     xTaskCreate(scd_read_data, "SCD read Task", 4096, NULL, 5, &scd_read_task_handle);
-
-    scd_write_command(SCD40_I2C_ADDR, SCD40_START_PERIODIC); // start periodic measurement
+    scd_write_command_2byte(SCD40_I2C_ADDR, SCD40_START_PERIODIC); // start periodic measurement
     xTimerStart(scdReadTimer, portMAX_DELAY);
+    // for (uint8_t addr = 1; addr < 127; addr++)
+    // {
+    //     if (i2c_probe(I2C_NUM_0, addr) == ESP_OK) {
+    //         printf("Found: 0x%02X\n", addr);
+    //     }
+    // }
 }
