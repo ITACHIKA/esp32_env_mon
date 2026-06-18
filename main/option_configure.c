@@ -7,9 +7,9 @@
 #include "esp_mac.h"
 #include "batt_mon.h"
 #include "esp_common.h"
+#include "sensiron_common.h"
 
 #define I2C_MASTER_NUM I2C_NUM_0
-#define SCD40_I2C_ADDR 0x62
 
 QueueHandle_t uartInputQueue;
 bool optionChange = false;
@@ -377,7 +377,7 @@ int batt_level_command(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
-    uint8_t batt_lvl = get_battery_level();
+    uint8_t batt_lvl = get_battery_level(get_batt_voltage());
     esp_rom_printf("Current battery level: %d\r\n",batt_lvl);
     return 0;
 }
