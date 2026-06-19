@@ -8,6 +8,7 @@
 #include "batt_mon.h"
 #include "esp_common.h"
 #include "sensiron_common.h"
+#include "sensirion_gas_index_algorithm.h"
 
 static const char *TAG = "main";
 
@@ -35,8 +36,13 @@ static char *mqtt_atemp_scd40_topic;
 static char *mqtt_rh_scd40_topic;
 static char *mqtt_atemp_sht40_topic;
 static char *mqtt_rh_sht40_topic;
+static char *mqtt_voc_sgp41_topic;
+static char *mqtt_nox_sgp41_topic;
 static char *mqtt_battlvl_topic;
 static char *mqtt_battraw_topic;
+
+GasIndexAlgorithmParams voc_params;
+GasIndexAlgorithmParams nox_params;
 
 static esp_err_t i2c_probe(i2c_port_t port, uint8_t addr)
 {
@@ -76,6 +82,7 @@ uint8_t sensirion_common_generate_crc(const uint8_t *data, uint16_t count)
     return crc;
 }
 
+/*This function prcesses with endieness*/
 static esp_err_t scd_write_command_2byte(uint8_t addr,uint16_t cmd)
 {
     uint8_t send_seq[2];
@@ -89,6 +96,17 @@ static esp_err_t scd_write_command_byte(uint8_t addr,uint8_t cmd)
     return i2c_master_write_to_device(I2C_MASTER_NUM, addr, &cmd, 1, pdMS_TO_TICKS(500));
 }
 
+/*This function does not process with endieness. To send 2 bytes to SCD40, use scd_write_command_2byte */
+static esp_err_t scd_write_bytes(uint8_t addr, const uint8_t *data,size_t len)
+{
+    return i2c_master_write_to_device(
+        I2C_MASTER_NUM,
+        addr,
+        data,
+        len,
+        pdMS_TO_TICKS(500));
+}
+
 void scd_read_callback()
 {
     xTaskNotifyGive(scd_read_task_handle);
@@ -97,6 +115,8 @@ void scd_read_callback()
 void scd_read_data(void *pvParameters)
 {
     static uint8_t counter = 0;
+    static uint8_t sgp_heat_counter = 0;
+    static bool sgp41_heat_done = false;
     for (;;)
     {
         char result[32];
@@ -148,7 +168,7 @@ void scd_read_data(void *pvParameters)
             uint8_t rh_crc = readBuffer[5];
             bool atemp_crc_res = (sensirion_common_generate_crc(&readBuffer[0], 2) == atemp_crc);
             bool rh_crc_res = (sensirion_common_generate_crc(&readBuffer[3], 2) == rh_crc);
-            float atemp = -45.0f + 175.0f * ((float)atemp_raw_tick / 65535.0f);
+            float atemp = -45.0f + 175.0f * ((float)atemp_raw_tick / 65535.0f); 
             float rh = -6.0f +125.0f * ((float)rh_raw_tick / 65535.0f);
             // ESP_LOGI(TAG, "SHT40 read: atemp=%.2f, rh=%.2f", atemp, rh);
             if (atemp_crc_res)
@@ -161,6 +181,68 @@ void scd_read_data(void *pvParameters)
                 snprintf(result, sizeof(result), "{\"rh\":%.2f}", rh);
                 mqtt_publish(mqtt_rh_sht40_topic, result);
             }
+
+            //read SGP41
+            if(sgp_heat_counter==10 && !sgp41_heat_done)
+            {
+                sgp41_heat_done = true;
+            }
+            ++sgp_heat_counter;
+            if(!sgp41_heat_done)
+            {
+                scd_write_bytes(SGP41_I2C_ADDR, SGP41_CONDITIONING_CMD, sizeof(SGP41_CONDITIONING_CMD)); // heat for 1s
+            }
+            else
+            {
+                uint8_t tx[8];
+                tx[0] = 0x26;
+                tx[1] = 0x19;
+
+                tx[2] = (uint8_t)(rh_raw_tick >> 8);
+                tx[3] = (uint8_t)(rh_raw_tick & 0xFF);
+                tx[4] = sensirion_common_generate_crc(&tx[2], 2);
+
+                tx[5] = (uint8_t)(atemp_raw_tick >> 8);
+                tx[6] = (uint8_t)(atemp_raw_tick & 0xFF);
+                tx[7] = sensirion_common_generate_crc(&tx[5], 2);
+                ret = scd_write_bytes(SGP41_I2C_ADDR, tx, sizeof(tx));
+                if(ret!=ESP_OK)
+                {
+                    ESP_LOGE(TAG, "SGP41 Write error: %d", ret);
+                    fault_flag = true;
+                    continue;
+                }
+                vTaskDelay(pdMS_TO_TICKS(60));
+                ret = i2c_master_read_from_device(I2C_MASTER_NUM, SGP41_I2C_ADDR, readBuffer, 6, pdMS_TO_TICKS(200));
+                if (ret != ESP_OK)
+                {
+                    ESP_LOGE(TAG, "SGP41 Read error: %d", ret);
+                    //fault_flag = true;
+                    //continue;
+                }
+                else
+                {
+                    uint16_t voc_raw_tick = ((uint16_t)readBuffer[0] << 8 | readBuffer[1]);
+                    uint16_t nox_raw_tick = ((uint16_t)readBuffer[3] << 8 | readBuffer[4]);
+                    int32_t voc_index;
+                    int32_t nox_index;
+                    bool voc_crc_res = (sensirion_common_generate_crc(&readBuffer[0], 2) == readBuffer[2]);
+                    bool nox_crc_res = (sensirion_common_generate_crc(&readBuffer[3], 2) == readBuffer[5]);
+                    if (voc_crc_res)
+                    {
+                        GasIndexAlgorithm_process(&voc_params, voc_raw_tick, &voc_index);
+                        snprintf(result, sizeof(result), "{\"voc\":%ld}", voc_index);
+                        mqtt_publish(mqtt_voc_sgp41_topic, result);
+                    }
+                    if (nox_crc_res)
+                    {
+                        GasIndexAlgorithm_process(&nox_params, nox_raw_tick, &nox_index);
+                        snprintf(result, sizeof(result), "{\"nox\":%ld}", nox_index);
+                        mqtt_publish(mqtt_nox_sgp41_topic, result);
+                    }
+                }
+            }
+
             //read SCD40
             ++counter;
             if(counter==5)
@@ -239,7 +321,9 @@ void app_main(void)
     mqtt_battlvl_topic = calloc(1, 128);
     mqtt_battraw_topic = calloc(1, 128);
     mqtt_atemp_sht40_topic = calloc(1, 128);
-    mqtt_rh_sht40_topic = calloc(1, 128);    
+    mqtt_rh_sht40_topic = calloc(1, 128);
+    mqtt_voc_sgp41_topic = calloc(1,128);
+    mqtt_nox_sgp41_topic = calloc(1,128);
     snprintf(mqtt_co2_scd40_topic, 128, "sensor/%s/co2", devName);
     snprintf(mqtt_rh_scd40_topic, 128, "sensor/%s/rh_scd40", devName);
     snprintf(mqtt_atemp_scd40_topic, 128, "sensor/%s/atemp_scd40", devName); // debug only
@@ -247,6 +331,8 @@ void app_main(void)
     snprintf(mqtt_rh_sht40_topic,128,"sensor/%s/rh",devName);// default use SHT40 measurement
     snprintf(mqtt_battlvl_topic,128,"sensor/%s/battlvl",devName);
     snprintf(mqtt_battraw_topic,128,"sensor/%s/battraw",devName);
+    snprintf(mqtt_voc_sgp41_topic,128,"sensor/%s/voc",devName);
+    snprintf(mqtt_nox_sgp41_topic,128,"sensor/%s/nox",devName);
     i2c_config_t conf = {
         .mode = I2C_MODE_MASTER,
         .sda_io_num = I2C_MASTER_SDA,
@@ -257,6 +343,9 @@ void app_main(void)
     };
     ESP_ERROR_CHECK(i2c_param_config(I2C_MASTER_NUM, &conf));
     ESP_ERROR_CHECK(i2c_driver_install(I2C_MASTER_NUM, conf.mode, 0, 0, 0));
+
+    GasIndexAlgorithm_init(&voc_params, GasIndexAlgorithm_ALGORITHM_TYPE_VOC);
+    GasIndexAlgorithm_init(&nox_params, GasIndexAlgorithm_ALGORITHM_TYPE_NOX);
 
     scdReadTimer = xTimerCreate("scdReadTimer", pdMS_TO_TICKS(1000), pdTRUE, NULL, scd_read_callback);
     vTaskDelay(pdMS_TO_TICKS(1000)); // wait for SCD40 ready
