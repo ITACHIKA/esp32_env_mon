@@ -54,37 +54,80 @@ static void wifiEventHandler(void *handlerargs, esp_event_base_t event_base, int
     }
 }
 
-void networkInit()
+esp_err_t networkInit(void)
 {
+    esp_err_t ret;
+
     if (strcmp(wifiSSID, "") == 0)
     {
         ESP_LOGE(TAG,"Wifi config invalid. Please reset.");
+        return ESP_ERR_INVALID_ARG;
     }
     else
     {
         ESP_LOGI(TAG,"wifissid:%s", wifiSSID);
         //esp_rom_printf("wifipass:%s\n", WifiPasswd);
-        ESP_ERROR_CHECK(esp_netif_init());
-        ESP_ERROR_CHECK(esp_event_loop_create_default());
+        ret = esp_netif_init();
+        if(ret != ESP_OK)
+        {
+            ESP_LOGE(TAG,"Netif init unsuccessful on esp_netif_init(): %s", esp_err_to_name(ret));
+            return ret;
+        }
+        ret = esp_event_loop_create_default();
+        if(ret != ESP_OK)
+        {
+            ESP_LOGE(TAG,"Netif init unsuccessful on esp_event_loop_create_default(): %s", esp_err_to_name(ret));
+            return ret;
+        }
         esp_netif_t* sta_netif = esp_netif_create_default_wifi_sta();
-        esp_netif_set_hostname(sta_netif, devName);
+        if(sta_netif == NULL)
+        {
+            ESP_LOGE(TAG,"Netif init unsuccessful on esp_netif_create_default_wifi_sta().");
+            return ESP_FAIL;
+        }
+        ret = esp_netif_set_hostname(sta_netif, devName);
+        if(ret != ESP_OK)
+        {
+            ESP_LOGE(TAG,"Netif init unsuccessful on esp_netif_set_hostname(): %s", esp_err_to_name(ret));
+            return ret;
+        }
         wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-        ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-        esp_wifi_set_mode(WIFI_MODE_STA);
+        ret = esp_wifi_init(&cfg);
+        if(ret != ESP_OK)
+        {
+            ESP_LOGE(TAG,"Wifi init unsuccessful on esp_wifi_init(): %s", esp_err_to_name(ret));
+            return ret;
+        }
+        ret = esp_wifi_set_mode(WIFI_MODE_STA);
+        if(ret != ESP_OK)
+        {
+            ESP_LOGE(TAG,"Wifi init unsuccessful on esp_wifi_set_mode(): %s", esp_err_to_name(ret));
+            return ret;
+        }
 
-        ESP_ERROR_CHECK(esp_event_handler_instance_register(
+        ret = esp_event_handler_instance_register(
             WIFI_EVENT,
             ESP_EVENT_ANY_ID,
             &wifiEventHandler,
             NULL,
-            NULL));
+            NULL);
+        if(ret != ESP_OK)
+        {
+            ESP_LOGE(TAG,"Wifi init unsuccessful on WIFI_EVENT register: %s", esp_err_to_name(ret));
+            return ret;
+        }
 
-        ESP_ERROR_CHECK(esp_event_handler_instance_register(
+        ret = esp_event_handler_instance_register(
             IP_EVENT,
             IP_EVENT_STA_GOT_IP,
             &wifiEventHandler,
             NULL,
-            NULL));
+            NULL);
+        if(ret != ESP_OK)
+        {
+            ESP_LOGE(TAG,"Wifi init unsuccessful on IP_EVENT register: %s", esp_err_to_name(ret));
+            return ret;
+        }
 
         wifi_config_t wifi_cfg = {0};
         wifi_cfg.sta.threshold.authmode=WIFI_AUTH_OPEN;
@@ -92,12 +135,39 @@ void networkInit()
         wifi_cfg.sta.ssid[sizeof(wifi_cfg.sta.ssid) - 1] = '\0';
         strncpy((char *)wifi_cfg.sta.password, WifiPasswd, sizeof(wifi_cfg.sta.password));
         wifi_cfg.sta.password[sizeof(wifi_cfg.sta.password) - 1] = '\0'; //to avoid ovf
-        esp_wifi_set_ps(WIFI_PS_NONE);
-        ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
-        ESP_ERROR_CHECK(esp_wifi_start());
+        ret = esp_wifi_set_ps(WIFI_PS_NONE);
+        if(ret != ESP_OK)
+        {
+            ESP_LOGE(TAG,"Wifi init unsuccessful on esp_wifi_set_ps(): %s", esp_err_to_name(ret));
+            return ret;
+        }
+        ret = esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg);
+        if(ret != ESP_OK)
+        {
+            ESP_LOGE(TAG,"Wifi init unsuccessful on esp_wifi_set_config(): %s", esp_err_to_name(ret));
+            return ret;
+        }
+        ret = esp_wifi_start();
+        if(ret != ESP_OK)
+        {
+            ESP_LOGE(TAG,"Wifi init unsuccessful on esp_wifi_start(): %s", esp_err_to_name(ret));
+            return ret;
+        }
         
-        ESP_ERROR_CHECK(esp_wifi_set_max_tx_power(44)); //https://esp32.com/viewtopic.php?f=2&t=41899#p137764, guess for YD-ESP32-S3 or similar clones only
+        ret = esp_wifi_set_max_tx_power(44); //https://esp32.com/viewtopic.php?f=2&t=41899#p137764, guess for YD-ESP32-S3 or similar clones only
+        if(ret != ESP_OK)
+        {
+            ESP_LOGE(TAG,"Wifi init unsuccessful on esp_wifi_set_max_tx_power(): %s", esp_err_to_name(ret));
+            return ret;
+        }
         
-        ESP_LOGI(TAG,"wifi connect: %d", esp_wifi_connect());
+        ret = esp_wifi_connect();
+        if(ret != ESP_OK)
+        {
+            ESP_LOGE(TAG,"Wifi init unsuccessful on esp_wifi_connect(): %s", esp_err_to_name(ret));
+            return ret;
+        }
+        ESP_LOGI(TAG,"wifi connect: %d", ret);
     }
+    return ESP_OK;
 }
