@@ -13,10 +13,16 @@ static uint8_t mqtt_err_cnt = 0;
 
 esp_err_t mqtt_init()
 {
-    esp_mqtt_client_config_t config = {
-        .broker.address.uri = mqttUri,
-        //.broker.address.uri="mqtt://192.168.1.100:1883",
-    };
+    esp_mqtt_client_config_t config = {0};
+    if (strcmp(mqttUri, "") != 0)
+    {
+        config.broker.address.uri = mqttUri;
+    }
+    else
+    {
+        ESP_LOGE(TAG, "MQTT URI is empty, please check configuration");
+        return ESP_ERR_INVALID_ARG;
+    }
     if (strcmp(mqttUsername, "") != 0)
     {
         config.credentials.username = mqttUsername;
