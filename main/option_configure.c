@@ -1,6 +1,7 @@
 #include "option_configure.h"
 #include "uart_service.h"
 #include "nvs_service.h"
+#include "log_service.h"
 #include "esp_console.h"
 #include "argtable3/argtable3.h"
 #include "driver/i2c.h"
@@ -405,6 +406,117 @@ esp_err_t esp_console_register_batt_level_command(void)
     return esp_console_cmd_register(&command);
 }
 
+static struct
+{
+    struct arg_int *line_count;
+    struct arg_end *end;
+} readlog_args;
+
+int readlog_command(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&readlog_args);
+
+    if (nerrors != 0)
+    {
+        arg_print_errors(stderr, readlog_args.end, argv[0]);
+        return 1;
+    }
+
+    int line_count = 0;
+    if (readlog_args.line_count->count > 0)
+    {
+        line_count = readlog_args.line_count->ival[0];
+    }
+
+    esp_err_t ret = log_service_print(line_count);
+    if (ret != ESP_OK)
+    {
+        esp_rom_printf("Read log failed: %s\r\n", esp_err_to_name(ret));
+        return 1;
+    }
+
+    return 0;
+}
+
+esp_err_t esp_console_register_readlog_command(void)
+{
+    readlog_args.line_count = arg_int0(NULL, NULL, "<line count>", "recent log lines to print, 0 or omitted for all");
+    readlog_args.end = arg_end(2);
+
+    esp_console_cmd_t command = {
+        .command = "readlog",
+        .help = "Read logs. Use 0 or omit count to print all logs.",
+        .func = &readlog_command,
+        .argtable = &readlog_args};
+    return esp_console_cmd_register(&command);
+}
+
+int clearlog_command(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    esp_err_t ret = log_service_clear();
+    if (ret != ESP_OK)
+    {
+        esp_rom_printf("Clear log failed: %s\r\n", esp_err_to_name(ret));
+        return 1;
+    }
+
+    esp_rom_printf("Logs cleared.\r\n");
+    return 0;
+}
+
+esp_err_t esp_console_register_clearlog_command(void)
+{
+    esp_console_cmd_t command = {
+        .command = "clearlog",
+        .help = "Clear all logs.",
+        .func = &clearlog_command,
+        .argtable = NULL};
+    return esp_console_cmd_register(&command);
+}
+
+static struct
+{
+    struct arg_str *message;
+    struct arg_end *end;
+} writelog_args;
+
+int writelog_command(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&writelog_args);
+
+    if (nerrors != 0)
+    {
+        arg_print_errors(stderr, writelog_args.end, argv[0]);
+        return 1;
+    }
+
+    esp_err_t ret = log_service_write(writelog_args.message->sval[0]);
+    if (ret != ESP_OK)
+    {
+        esp_rom_printf("Write log failed: %s\r\n", esp_err_to_name(ret));
+        return 1;
+    }
+
+    esp_rom_printf("Test log written.\r\n");
+    return 0;
+}
+
+esp_err_t esp_console_register_writelog_command(void)
+{
+    writelog_args.message = arg_str1(NULL, NULL, "<message>", "test log message to write");
+    writelog_args.end = arg_end(2);
+
+    esp_console_cmd_t command = {
+        .command = "writelog",
+        .help = "Write one log entry for test purpose only.",
+        .func = &writelog_command,
+        .argtable = &writelog_args};
+    return esp_console_cmd_register(&command);
+}
+
 void optionConfigInit()
 {
     //uartInputQueue = xQueueCreate(10, sizeof(char *));
@@ -427,6 +539,9 @@ void optionConfigInit()
     esp_console_register_uptime_command();
     esp_console_register_batt_command();
     esp_console_register_batt_level_command();
+    esp_console_register_readlog_command();
+    esp_console_register_clearlog_command();
+    esp_console_register_writelog_command();
     
     ESP_LOGI(TAG,"ESP configs and command load done.");
     // xTaskCreate(inputOptionHandler, "inputOptionHandler", 2048, NULL, 4, NULL);

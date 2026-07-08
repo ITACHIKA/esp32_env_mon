@@ -59,13 +59,20 @@ esp_err_t mqtt_init()
 
 esp_err_t mqtt_publish(const char *topic, const char *msg)
 {
-    if (networkReady)
+    if (!networkReady)
     {
-        int ret_code = esp_mqtt_client_publish(mqttclient, topic, msg, 0, 1, 0);
-        if (ret_code == -1 || ret_code == -2)
-        {
-            return ESP_FAIL;
-        }
+        return ESP_ERR_INVALID_STATE;
     }
+    if (mqttclient == NULL)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    int ret_code = esp_mqtt_client_publish(mqttclient, topic, msg, 0, 1, 0);
+    if (ret_code == -1 || ret_code == -2)
+    {
+        return ESP_FAIL;
+    }
+
     return ESP_OK;
 }

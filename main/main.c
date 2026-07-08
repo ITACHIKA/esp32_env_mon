@@ -3,6 +3,7 @@
 #include "nvs_service.h"
 #include "log_service.h"
 #include "network_service.h"
+#include "sntp_service.h"
 #include "mqtt_service.h"
 #include "driver/i2c.h"
 #include "net_shell.h"
@@ -10,6 +11,8 @@
 #include "esp_common.h"
 #include "sensiron_common.h"
 #include "sensirion_gas_index_algorithm.h"
+#include <stdarg.h>
+#include <time.h>
 
 static const char *TAG = "main";
 
@@ -51,6 +54,48 @@ static void error_handler()
     {
         vTaskSuspend(NULL);
     }
+}
+
+static void write_log_with_time(const char *fmt, ...)
+{
+    char event_buf[128];
+    char log_buf[192];
+    char time_buf[32];
+    time_t now;
+
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(event_buf, sizeof(event_buf), fmt, args);
+    va_end(args);
+
+    if (sntp_service_get_time(&now) == ESP_OK)
+    {
+        struct tm timeinfo = {0};
+        localtime_r(&now, &timeinfo);
+        strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &timeinfo);
+    }
+    else
+    {
+        snprintf(time_buf, sizeof(time_buf), "[time not available]");
+    }
+
+    snprintf(log_buf, sizeof(log_buf), "[%s] %s", time_buf, event_buf);
+    log_service_write(log_buf);
+}
+
+static esp_err_t mqtt_publish_with_log(const char *topic, const char *msg)
+{
+    esp_err_t ret = mqtt_publish(topic, msg);
+    if (ret != ESP_OK)
+    {
+        write_log_with_time(
+            "MQTT publish failed, topic=%s, err=%s(%d)",
+            topic,
+            esp_err_to_name(ret),
+            ret);
+    }
+
+    return ret;
 }
 
 static esp_err_t i2c_probe(i2c_port_t port, uint8_t addr)
@@ -136,6 +181,7 @@ void scd_read_data(void *pvParameters)
         {
             // esp_restart();
             ESP_LOGE(TAG, "I2C repetedly fail, please manually reset system power.");
+            write_log_with_time("I2C repeatedly failed, max retry count reached");
             //xTimerStop(scdReadTimer,portMAX_DELAY);
             error_handler();
         }
@@ -160,6 +206,7 @@ void scd_read_data(void *pvParameters)
             if (ret != ESP_OK)
             {
                 ESP_LOGE(TAG, "SHT40 Write error: %d", ret);
+                write_log_with_time("SHT40 write failed, err=%s(%d)", esp_err_to_name(ret), ret);
                 fault_flag = true;
                 continue;
             }
@@ -168,6 +215,7 @@ void scd_read_data(void *pvParameters)
             if (ret != ESP_OK)
             {
                 ESP_LOGE(TAG, "SHT40 Read error: %d", ret);
+                write_log_with_time("SHT40 read failed, err=%s(%d)", esp_err_to_name(ret), ret);
                 fault_flag = true;
                 continue;
             }
@@ -183,12 +231,20 @@ void scd_read_data(void *pvParameters)
             if (atemp_crc_res)
             {
                 snprintf(result, sizeof(result), "{\"atemp\":%.2f}", atemp);
-                ret = mqtt_publish(mqtt_atemp_sht40_topic, result);
+                ret = mqtt_publish_with_log(mqtt_atemp_sht40_topic, result);
+            }
+            else
+            {
+                write_log_with_time("SHT40 atemp CRC invalid");
             }
             if (rh_crc_res)
             {
                 snprintf(result, sizeof(result), "{\"rh\":%.2f}", rh);
-                ret = mqtt_publish(mqtt_rh_sht40_topic, result);
+                ret = mqtt_publish_with_log(mqtt_rh_sht40_topic, result);
+            }
+            else
+            {
+                write_log_with_time("SHT40 rh CRC invalid");
             }
 
             //read SGP41
@@ -218,6 +274,7 @@ void scd_read_data(void *pvParameters)
                 if(ret!=ESP_OK)
                 {
                     ESP_LOGE(TAG, "SGP41 Write error: %d", ret);
+                    write_log_with_time("SGP41 write failed, err=%s(%d)", esp_err_to_name(ret), ret);
                     fault_flag = true;
                     continue;
                 }
@@ -226,6 +283,7 @@ void scd_read_data(void *pvParameters)
                 if (ret != ESP_OK)
                 {
                     ESP_LOGE(TAG, "SGP41 Read error: %d", ret);
+                    write_log_with_time("SGP41 read failed, err=%s(%d)", esp_err_to_name(ret), ret);
                     //fault_flag = true;
                     //continue;
                 }
@@ -241,13 +299,21 @@ void scd_read_data(void *pvParameters)
                     {
                         GasIndexAlgorithm_process(&voc_params, voc_raw_tick, &voc_index);
                         snprintf(result, sizeof(result), "{\"voc\":%ld}", voc_index);
-                        ret = mqtt_publish(mqtt_voc_sgp41_topic, result);
+                        ret = mqtt_publish_with_log(mqtt_voc_sgp41_topic, result);
+                    }
+                    else
+                    {
+                        write_log_with_time("SGP41 voc CRC invalid");
                     }
                     if (nox_crc_res)
                     {
                         GasIndexAlgorithm_process(&nox_params, nox_raw_tick, &nox_index);
                         snprintf(result, sizeof(result), "{\"nox\":%ld}", nox_index);
-                        ret = mqtt_publish(mqtt_nox_sgp41_topic, result);
+                        ret = mqtt_publish_with_log(mqtt_nox_sgp41_topic, result);
+                    }
+                    else
+                    {
+                        write_log_with_time("SGP41 nox CRC invalid");
                     }
                 }
             }
@@ -261,6 +327,7 @@ void scd_read_data(void *pvParameters)
                 if (ret != ESP_OK)
                 {
                     ESP_LOGE(TAG, "SCD40 Write error: %d", ret);
+                    write_log_with_time("SCD40 write failed, err=%s(%d)", esp_err_to_name(ret), ret);
                     fault_flag = true;
                     continue;
                 }
@@ -269,6 +336,7 @@ void scd_read_data(void *pvParameters)
                 if (ret != ESP_OK)
                 {
                     ESP_LOGE(TAG, "SCD40 Read error: %d", ret);
+                    write_log_with_time("SCD40 read failed, err=%s(%d)", esp_err_to_name(ret), ret);
                     fault_flag = true;
                     continue;
                 }
@@ -283,17 +351,29 @@ void scd_read_data(void *pvParameters)
                 if (co2_crc_res)
                 {
                     snprintf(result, sizeof(result), "{\"co2\":%u}", co2_ppm);
-                    ret = mqtt_publish(mqtt_co2_scd40_topic, result);
+                    ret = mqtt_publish_with_log(mqtt_co2_scd40_topic, result);
+                }
+                else
+                {
+                    write_log_with_time("SCD40 co2 CRC invalid");
                 }
                 if (temp_crc_res)
                 {
                     snprintf(result, sizeof(result), "{\"atemp_scd40\":%.2f}", amb_temp);
-                    ret = mqtt_publish(mqtt_atemp_scd40_topic, result);
+                    ret = mqtt_publish_with_log(mqtt_atemp_scd40_topic, result);
+                }
+                else
+                {
+                    write_log_with_time("SCD40 atemp CRC invalid"); //atemp and rh from SCD40 are read but SHT40 info is recommended
                 }
                 if (rh_crc_res)
                 {
                     snprintf(result, sizeof(result), "{\"rh_scd40\":%.2f}", rel_humi);
-                    ret = mqtt_publish(mqtt_rh_scd40_topic, result);
+                    ret = mqtt_publish_with_log(mqtt_rh_scd40_topic, result);
+                }
+                else
+                {
+                    write_log_with_time("SCD40 rh CRC invalid");
                 }
             }
         }
@@ -329,10 +409,15 @@ void app_main(void)
         .s1_pin = 40
     };
     batt_mon_init(cfg);
-    if (networkInit() != ESP_OK)
+    esp_err_t ret = networkInit();
+    if (ret != ESP_OK)
     {
         // error_handler();
         ESP_LOGE(TAG, "Network init fail.");
+    }
+    else if (sntp_service_init() != ESP_OK)
+    {
+        ESP_LOGE(TAG, "SNTP sync fail.");
     }
     if (mqtt_init() != ESP_OK)
     {
@@ -371,7 +456,7 @@ void app_main(void)
 
     GasIndexAlgorithm_init(&voc_params, GasIndexAlgorithm_ALGORITHM_TYPE_VOC);
     GasIndexAlgorithm_init(&nox_params, GasIndexAlgorithm_ALGORITHM_TYPE_NOX);
-
+    write_log_with_time("System start, device name: %s", devName);
     scdReadTimer = xTimerCreate("scdReadTimer", pdMS_TO_TICKS(1000), pdTRUE, NULL, scd_read_callback);
     vTaskDelay(pdMS_TO_TICKS(1000)); // wait for SCD40 ready
     xTaskCreate(scd_read_data, "SCD read Task", 4096, NULL, 5, &scd_read_task_handle);
