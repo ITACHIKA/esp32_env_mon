@@ -50,7 +50,7 @@ esp_err_t mqtt_init()
                 break;
             }
         }
-        ESP_LOGE(TAG, "mqtt client init fail.");
+        ESP_LOGE(TAG, "mqtt client init fail. Max retry count reached, please check configuration.");
         return ESP_FAIL;
     }
     esp_mqtt_client_start(mqttclient);
