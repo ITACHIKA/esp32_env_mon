@@ -1,6 +1,7 @@
 #include "uart_service.h"
 #include "option_configure.h"
 #include "nvs_service.h"
+#include "log_service.h"
 #include "network_service.h"
 #include "mqtt_service.h"
 #include "driver/i2c.h"
@@ -43,6 +44,14 @@ static char *mqtt_battraw_topic;
 
 GasIndexAlgorithmParams voc_params;
 GasIndexAlgorithmParams nox_params;
+
+static void error_handler()
+{
+    for(;;)
+    {
+        vTaskSuspend(NULL);
+    }
+}
 
 static esp_err_t i2c_probe(i2c_port_t port, uint8_t addr)
 {
@@ -128,7 +137,7 @@ void scd_read_data(void *pvParameters)
             // esp_restart();
             ESP_LOGE(TAG, "I2C repetedly fail, please manually reset system power.");
             //xTimerStop(scdReadTimer,portMAX_DELAY);
-            need_reset = true;
+            error_handler();
         }
         if (fault_flag && !need_reset)
         {
@@ -174,12 +183,12 @@ void scd_read_data(void *pvParameters)
             if (atemp_crc_res)
             {
                 snprintf(result, sizeof(result), "{\"atemp\":%.2f}", atemp);
-                mqtt_publish(mqtt_atemp_sht40_topic, result);
+                ret = mqtt_publish(mqtt_atemp_sht40_topic, result);
             }
             if (rh_crc_res)
             {
                 snprintf(result, sizeof(result), "{\"rh\":%.2f}", rh);
-                mqtt_publish(mqtt_rh_sht40_topic, result);
+                ret = mqtt_publish(mqtt_rh_sht40_topic, result);
             }
 
             //read SGP41
@@ -232,13 +241,13 @@ void scd_read_data(void *pvParameters)
                     {
                         GasIndexAlgorithm_process(&voc_params, voc_raw_tick, &voc_index);
                         snprintf(result, sizeof(result), "{\"voc\":%ld}", voc_index);
-                        mqtt_publish(mqtt_voc_sgp41_topic, result);
+                        ret = mqtt_publish(mqtt_voc_sgp41_topic, result);
                     }
                     if (nox_crc_res)
                     {
                         GasIndexAlgorithm_process(&nox_params, nox_raw_tick, &nox_index);
                         snprintf(result, sizeof(result), "{\"nox\":%ld}", nox_index);
-                        mqtt_publish(mqtt_nox_sgp41_topic, result);
+                        ret = mqtt_publish(mqtt_nox_sgp41_topic, result);
                     }
                 }
             }
@@ -274,17 +283,17 @@ void scd_read_data(void *pvParameters)
                 if (co2_crc_res)
                 {
                     snprintf(result, sizeof(result), "{\"co2\":%u}", co2_ppm);
-                    mqtt_publish(mqtt_co2_scd40_topic, result);
+                    ret = mqtt_publish(mqtt_co2_scd40_topic, result);
                 }
                 if (temp_crc_res)
                 {
                     snprintf(result, sizeof(result), "{\"atemp_scd40\":%.2f}", amb_temp);
-                    mqtt_publish(mqtt_atemp_scd40_topic, result);
+                    ret = mqtt_publish(mqtt_atemp_scd40_topic, result);
                 }
                 if (rh_crc_res)
                 {
                     snprintf(result, sizeof(result), "{\"rh_scd40\":%.2f}", rel_humi);
-                    mqtt_publish(mqtt_rh_scd40_topic, result);
+                    ret = mqtt_publish(mqtt_rh_scd40_topic, result);
                 }
             }
         }
@@ -300,7 +309,16 @@ void scd_read_data(void *pvParameters)
 void app_main(void)
 {
     // init all components here
-    ESP_ERROR_CHECK(nvs_utils_init());
+    if(nvs_utils_init() != ESP_OK)
+    {
+        ESP_LOGE(TAG,"NVS init fail.");
+        error_handler();
+    }
+    if(log_service_init()!= ESP_OK)
+    {
+        ESP_LOGE(TAG,"Log service init fail.");
+        error_handler();
+    }
     optionConfigInit();
     uart_init();
     batt_cfg cfg = {
@@ -311,8 +329,15 @@ void app_main(void)
         .s1_pin = 40
     };
     batt_mon_init(cfg);
-    networkInit();
-    mqtt_init();
+    if (networkInit() != ESP_OK)
+    {
+        // error_handler();
+        ESP_LOGE(TAG, "Network init fail.");
+    }
+    if (mqtt_init() != ESP_OK)
+    {
+        ESP_LOGE(TAG, "MQTT init fail.");
+    }
     start_webserver();
     // put user code here
     mqtt_co2_scd40_topic = calloc(1, 128);
