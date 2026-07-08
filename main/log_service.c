@@ -265,7 +265,11 @@ esp_err_t log_service_clear(void)
     return err;
 }
 
+<<<<<<< HEAD
 esp_err_t log_service_print(int line_count)
+=======
+esp_err_t log_service_print(size_t line_count)
+>>>>>>> 50e8f2d7dbc753499fa4925cb48d3e542429cb79
 {
     if (!log_mounted)
     {
