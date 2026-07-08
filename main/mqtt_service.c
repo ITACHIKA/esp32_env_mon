@@ -11,7 +11,7 @@ static const char *TAG = "MQTT";
 #define MQTT_MAX_ERR_CNT 15
 static uint8_t mqtt_err_cnt = 0;
 
-void mqtt_init()
+esp_err_t mqtt_init()
 {
     esp_mqtt_client_config_t config = {
         .broker.address.uri = mqttUri,
@@ -45,24 +45,21 @@ void mqtt_init()
             }
         }
         ESP_LOGE(TAG, "mqtt client init fail.");
-        return;
+        return ESP_FAIL;
     }
     esp_mqtt_client_start(mqttclient);
+    return ESP_OK;
 }
 
-void mqtt_publish(const char *topic, const char *msg)
+esp_err_t mqtt_publish(const char *topic, const char *msg)
 {
     if (networkReady)
     {
         int ret_code = esp_mqtt_client_publish(mqttclient, topic, msg, 0, 1, 0);
         if (ret_code == -1 || ret_code == -2)
         {
-            mqtt_err_cnt++;
-        }
-        if (mqtt_err_cnt == MQTT_MAX_ERR_CNT)
-        {
-            ESP_LOGE(TAG, "MQTT error limit exceded. Reboot.");
-            esp_restart();
+            return ESP_FAIL;
         }
     }
+    return ESP_OK;
 }
