@@ -22,7 +22,7 @@ static const char *TAG = "main";
 
 #define I2C_MASTER_FREQ_HZ 100000
 
-#define MAX_RETRIES_BEFORE_REBOOT 5
+#define MAX_RETRIES_BEFORE_REBOOT 15
 
 #define CRC8_POLYNOMIAL 0x31
 #define CRC8_INIT 0xFF
@@ -32,7 +32,6 @@ TimerHandle_t scdReadTimer;
 TaskHandle_t scd_read_task_handle;
 
 bool fault_flag = false;
-bool need_reset = true;
 static uint8_t fail_cnt = 0;
 
 static char *mqtt_co2_scd40_topic;
@@ -171,6 +170,7 @@ void scd_read_data(void *pvParameters)
     static uint8_t counter = 0;
     static uint8_t sgp_heat_counter = 0;
     static bool sgp41_heat_done = false;
+    static int64_t last_fail_time = 0;
     for (;;)
     {
         char result[32];
@@ -185,16 +185,29 @@ void scd_read_data(void *pvParameters)
             //xTimerStop(scdReadTimer,portMAX_DELAY);
             error_handler();
         }
-        if (fault_flag && !need_reset)
+        if (fault_flag)
         {
             fail_cnt++;
-            ESP_LOGE(TAG, "I2C error, now reinit");
-            scd_write_command_2byte(SCD40_I2C_ADDR, SCD40_STOP_PERIODIC); // stop periodic
-            vTaskDelay(pdMS_TO_TICKS(500));
-            scd_write_command_2byte(SCD40_I2C_ADDR, SCD40_REINIT); // reinit
-            vTaskDelay(pdMS_TO_TICKS(30));
-            scd_write_command_2byte(SCD40_I2C_ADDR, SCD40_START_PERIODIC);
-            xTimerReset(scdReadTimer, portMAX_DELAY);
+            ESP_LOGE(TAG, "an i2c fault detected");
+            int64_t now = esp_timer_get_time();
+            if(last_fail_time!=0)
+            {
+                if((now-last_fail_time)>1000000) // 1 second
+                {
+                    fail_cnt = 0;
+                }
+                else
+                {
+                    fail_cnt++;
+                }
+            }
+            last_fail_time = now;
+            // scd_write_command_2byte(SCD40_I2C_ADDR, SCD40_STOP_PERIODIC); // stop periodic
+            // vTaskDelay(pdMS_TO_TICKS(500));
+            // scd_write_command_2byte(SCD40_I2C_ADDR, SCD40_REINIT); // reinit
+            // vTaskDelay(pdMS_TO_TICKS(30));
+            // scd_write_command_2byte(SCD40_I2C_ADDR, SCD40_START_PERIODIC);
+            // xTimerReset(scdReadTimer, portMAX_DELAY);
             fault_flag = false;
             continue;
         }
@@ -208,7 +221,7 @@ void scd_read_data(void *pvParameters)
                 ESP_LOGE(TAG, "SHT40 Write error: %d", ret);
                 write_log_with_time("SHT40 write failed, err=%s(%d)", esp_err_to_name(ret), ret);
                 fault_flag = true;
-                continue;
+                // continue;
             }
             vTaskDelay(pdMS_TO_TICKS(10));
             ret = i2c_master_read_from_device(I2C_MASTER_NUM, SHT40_I2C_ADDR, readBuffer, 6, pdMS_TO_TICKS(200));
@@ -217,7 +230,7 @@ void scd_read_data(void *pvParameters)
                 ESP_LOGE(TAG, "SHT40 Read error: %d", ret);
                 write_log_with_time("SHT40 read failed, err=%s(%d)", esp_err_to_name(ret), ret);
                 fault_flag = true;
-                continue;
+                // continue;
             }
             uint16_t atemp_raw_tick = ((uint16_t)readBuffer[0] << 8 | readBuffer[1]);
             uint16_t rh_raw_tick = ((uint16_t)readBuffer[3] << 8 | readBuffer[4]);
@@ -276,7 +289,7 @@ void scd_read_data(void *pvParameters)
                     ESP_LOGE(TAG, "SGP41 Write error: %d", ret);
                     write_log_with_time("SGP41 write failed, err=%s(%d)", esp_err_to_name(ret), ret);
                     fault_flag = true;
-                    continue;
+                    // continue;
                 }
                 vTaskDelay(pdMS_TO_TICKS(60));
                 ret = i2c_master_read_from_device(I2C_MASTER_NUM, SGP41_I2C_ADDR, readBuffer, 6, pdMS_TO_TICKS(200));
@@ -284,7 +297,7 @@ void scd_read_data(void *pvParameters)
                 {
                     ESP_LOGE(TAG, "SGP41 Read error: %d", ret);
                     write_log_with_time("SGP41 read failed, err=%s(%d)", esp_err_to_name(ret), ret);
-                    //fault_flag = true;
+                    fault_flag = true;
                     //continue;
                 }
                 else
@@ -329,7 +342,7 @@ void scd_read_data(void *pvParameters)
                     ESP_LOGE(TAG, "SCD40 Write error: %d", ret);
                     write_log_with_time("SCD40 write failed, err=%s(%d)", esp_err_to_name(ret), ret);
                     fault_flag = true;
-                    continue;
+                    // continue;
                 }
                 vTaskDelay(pdMS_TO_TICKS(1)); // according to ds
                 ret = i2c_master_read_from_device(I2C_MASTER_NUM, SCD40_I2C_ADDR, readBuffer, 9, pdMS_TO_TICKS(200));
@@ -338,7 +351,7 @@ void scd_read_data(void *pvParameters)
                     ESP_LOGE(TAG, "SCD40 Read error: %d", ret);
                     write_log_with_time("SCD40 read failed, err=%s(%d)", esp_err_to_name(ret), ret);
                     fault_flag = true;
-                    continue;
+                    // continue;
                 }
                 bool co2_crc_res = (sensirion_common_generate_crc(readBuffer, 2) == readBuffer[2]);
                 bool temp_crc_res = (sensirion_common_generate_crc(&readBuffer[3], 2) == readBuffer[5]);
