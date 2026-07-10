@@ -182,7 +182,7 @@ int view_command(int argc, char **argv)
     esp_rom_printf("Current config:\r\n");
     esp_rom_printf("Device Name:%s\r\n", devName);
     esp_rom_printf("Device MAC:%s\r\n", devmac);
-    esp_rom_printf("Wifi SSID:%s\r\n", wifiSSID);
+    // esp_rom_printf("Wifi SSID:%s\r\n", wifiSSID);
     esp_rom_printf("Wifi passwd:%s\r\n", WifiPasswd);
     esp_rom_printf("mqtt server uri:%s\r\n", mqttUri);
     esp_rom_printf("mqtt username:%s\r\n", mqttUsername);
