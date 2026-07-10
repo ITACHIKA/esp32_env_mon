@@ -15,9 +15,8 @@
 
 #define ESP_CONSOLE
 
-#define REPL_CHAR CONFIG_IDF_TARGET
-
 static const char* TAG="UART";
+static char* REPL_CHAR;
 
 static QueueHandle_t uartEventQueue;
 
@@ -99,7 +98,7 @@ void uart_init()
         .heap_alloc_caps = MALLOC_CAP_DEFAULT,  //!< where to (e.g. MALLOC_CAP_SPIRAM) allocate heap objects such as cmds used by esp_console
         .hint_color = 32,             //!< ASCII color code of hint text
         .hint_bold = 0,              //!< Set to 1 to print hint text in bold
-    };
+    }; 
     // linenoiseSetHintsCallback((linenoiseHintsCallback*) &esp_console_get_hint);
     // printf("config addr=%p  hint_color=%d\n", &console_config, console_config.hint_color);
     // printf("%d",esp_console_init(&console_config));
@@ -111,7 +110,9 @@ void uart_init()
     /* Prompt to be printed before each line.
      * This can be customized, made dynamic, etc.
      */
-    repl_config.prompt = REPL_CHAR ">";
+    REPL_CHAR = malloc(strlen(devName) + 2);
+    strcpy(REPL_CHAR, devName);
+    repl_config.prompt = strcat(REPL_CHAR, ">");
     repl_config.max_cmdline_length = 128;
     esp_console_dev_uart_config_t hw_config = {
     .channel = UART_NUM,    \
