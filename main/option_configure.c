@@ -5,10 +5,12 @@
 #include "esp_console.h"
 #include "argtable3/argtable3.h"
 #include "driver/i2c.h"
+#include "freertos/task.h"
 #include "esp_mac.h"
 #include "batt_mon.h"
 #include "esp_common.h"
 #include "sensiron_common.h"
+#include <stdint.h>
 
 #define I2C_MASTER_NUM I2C_NUM_0
 
@@ -412,6 +414,22 @@ static struct
     struct arg_end *end;
 } readlog_args;
 
+static TaskHandle_t readlog_task_handle;
+
+static void readlog_task(void *pvParameters)
+{
+    int line_count = (int)(intptr_t)pvParameters;
+    esp_rom_printf("\r\n");
+    esp_err_t ret = log_service_print(line_count);
+    if (ret != ESP_OK)
+    {
+        esp_rom_printf("Read log failed: %s\r\n", esp_err_to_name(ret));
+    }
+
+    readlog_task_handle = NULL;
+    vTaskDelete(NULL);
+}
+
 int readlog_command(int argc, char **argv)
 {
     int nerrors = arg_parse(argc, argv, (void **)&readlog_args);
@@ -427,14 +445,33 @@ int readlog_command(int argc, char **argv)
     {
         line_count = readlog_args.line_count->ival[0];
     }
-
-    esp_err_t ret = log_service_print(line_count);
-    if (ret != ESP_OK)
+    if (line_count < 0)
     {
-        esp_rom_printf("Read log failed: %s\r\n", esp_err_to_name(ret));
+        esp_rom_printf("Invalid line count.\r\n");
+        return 1;
+    }
+    if (readlog_task_handle != NULL)
+    {
+        esp_rom_printf("Read log task is already running.\r\n");
         return 1;
     }
 
+    BaseType_t ret = xTaskCreatePinnedToCore(
+        readlog_task,
+        "readlog_task",
+        4096,
+        (void *)(intptr_t)line_count,
+        1,
+        &readlog_task_handle,
+        0); //pin to PRO core to prevent interference with APP core task
+    if (ret != pdPASS)
+    {
+        readlog_task_handle = NULL;
+        esp_rom_printf("Create read log task failed.\r\n");
+        return 1;
+    }
+
+    // esp_rom_printf("Read log task started.\r\n");
     return 0;
 }
 

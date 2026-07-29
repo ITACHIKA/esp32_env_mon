@@ -10,8 +10,11 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 
 static const char *TAG = "LOGSVC";
+
+#define LOG_SERVICE_PRINT_BUF_SIZE 128
 
 static SemaphoreHandle_t log_mutex;
 static bool log_mounted = false;
@@ -49,42 +52,6 @@ static esp_err_t log_service_rotate(void)
     return ESP_OK;
 }
 
-static esp_err_t log_service_count_file_lines(const char *path, size_t *line_count)
-{
-    FILE *file = fopen(path, "r");
-    if (file == NULL)
-    {
-        return errno == ENOENT ? ESP_OK : ESP_FAIL;
-    }
-
-    bool has_data = false;
-    bool last_was_newline = true;
-    int ch;
-    while ((ch = fgetc(file)) != EOF)
-    {
-        has_data = true;
-        if (ch == '\n')
-        {
-            (*line_count)++;
-            last_was_newline = true;
-        }
-        else
-        {
-            last_was_newline = false;
-        }
-    }
-
-    esp_err_t ret = ferror(file) ? ESP_FAIL : ESP_OK;
-    fclose(file);
-
-    if (ret == ESP_OK && has_data && !last_was_newline)
-    {
-        (*line_count)++;
-    }
-
-    return ret;
-}
-
 static void log_service_print_buffer(char *buf, size_t *buf_len)
 {
     if (*buf_len == 0)
@@ -97,7 +64,98 @@ static void log_service_print_buffer(char *buf, size_t *buf_len)
     *buf_len = 0;
 }
 
-static esp_err_t log_service_print_file_from_line(const char *path, size_t start_line, size_t *current_line)
+static esp_err_t log_service_find_tail_start(const char *path, size_t line_count, long *start_offset, size_t *lines_found)
+{
+    *start_offset = 0;
+    *lines_found = 0;
+
+    FILE *file = fopen(path, "r");
+    if (file == NULL)
+    {
+        return errno == ENOENT ? ESP_OK : ESP_FAIL;
+    }
+
+    if (fseek(file, 0, SEEK_END) != 0)
+    {
+        fclose(file);
+        return ESP_FAIL;
+    }
+
+    long block_end = ftell(file);
+    if (block_end < 0)
+    {
+        fclose(file);
+        return ESP_FAIL;
+    }
+    if (block_end == 0)
+    {
+        fclose(file);
+        return ESP_OK;
+    }
+
+    char buf[LOG_SERVICE_PRINT_BUF_SIZE];
+    size_t newline_count = 0;
+    bool saw_content = false;
+    bool found = false;
+
+    while (block_end > 0 && !found)
+    {
+        size_t read_size = block_end > (long)sizeof(buf) ? sizeof(buf) : (size_t)block_end;
+        long block_start = block_end - (long)read_size;
+
+        if (fseek(file, block_start, SEEK_SET) != 0)
+        {
+            fclose(file);
+            return ESP_FAIL;
+        }
+
+        size_t bytes_read = fread(buf, 1, read_size, file);
+        if (bytes_read != read_size && ferror(file))
+        {
+            fclose(file);
+            return ESP_FAIL;
+        }
+
+        for (size_t i = bytes_read; i > 0; --i)
+        {
+            long char_pos = block_start + (long)i - 1;
+            char ch = buf[i - 1];
+
+            if (!saw_content && ch == '\n')
+            {
+                continue;
+            }
+
+            saw_content = true;
+            if (ch == '\n')
+            {
+                newline_count++;
+                if (newline_count == line_count)
+                {
+                    *start_offset = char_pos + 1;
+                    *lines_found = line_count;
+                    found = true;
+                    break;
+                }
+            }
+        }
+
+        block_end = block_start;
+        vTaskDelay(1);
+    }
+
+    fclose(file);
+
+    if (!found && saw_content)
+    {
+        *start_offset = 0;
+        *lines_found = newline_count + 1;
+    }
+
+    return ESP_OK;
+}
+
+static esp_err_t log_service_print_file_from_offset(const char *path, long offset)
 {
     FILE *file = fopen(path, "r");
     if (file == NULL)
@@ -105,27 +163,23 @@ static esp_err_t log_service_print_file_from_line(const char *path, size_t start
         return errno == ENOENT ? ESP_OK : ESP_FAIL;
     }
 
-    char line_buf[128];
+    if (fseek(file, offset, SEEK_SET) != 0)
+    {
+        fclose(file);
+        return ESP_FAIL;
+    }
+
+    char line_buf[LOG_SERVICE_PRINT_BUF_SIZE];
     size_t line_buf_len = 0;
-    bool has_data = false;
-    bool last_was_newline = true;
+    size_t read_count = 0;
     int ch;
     while ((ch = fgetc(file)) != EOF)
     {
-        has_data = true;
         if (ch == '\n')
         {
-            if (*current_line >= start_line)
-            {
-                log_service_print_buffer(line_buf, &line_buf_len);
-            }
-            (*current_line)++;
-            last_was_newline = true;
-            continue;
+            log_service_print_buffer(line_buf, &line_buf_len);
         }
-
-        last_was_newline = false;
-        if (*current_line >= start_line)
+        else
         {
             line_buf[line_buf_len++] = (char)ch;
             if (line_buf_len == sizeof(line_buf) - 1)
@@ -133,18 +187,20 @@ static esp_err_t log_service_print_file_from_line(const char *path, size_t start
                 log_service_print_buffer(line_buf, &line_buf_len);
             }
         }
+
+        read_count++;
+        if ((read_count % 512) == 0)
+        {
+            vTaskDelay(1);
+        }
     }
 
     esp_err_t ret = ferror(file) ? ESP_FAIL : ESP_OK;
     fclose(file);
 
-    if (ret == ESP_OK && has_data && !last_was_newline)
+    if (ret == ESP_OK)
     {
-        if (*current_line >= start_line)
-        {
-            log_service_print_buffer(line_buf, &line_buf_len);
-        }
-        (*current_line)++;
+        log_service_print_buffer(line_buf, &line_buf_len);
     }
 
     return ret;
@@ -278,22 +334,40 @@ esp_err_t log_service_print(int line_count)
 
     xSemaphoreTake(log_mutex, portMAX_DELAY);
 
-    size_t total_lines = 0;
-    esp_err_t err = log_service_count_file_lines(LOG_SERVICE_BACKUP_FILE_PATH, &total_lines);
-    if (err == ESP_OK)
+    esp_err_t err = ESP_OK;
+    if (line_count == 0)
     {
-        err = log_service_count_file_lines(LOG_SERVICE_FILE_PATH, &total_lines);
-    }
-
-    if (err == ESP_OK)
-    {
-        size_t print_lines = line_count == 0 ? total_lines : (size_t)line_count;
-        size_t start_line = total_lines > print_lines ? total_lines - print_lines : 0;
-        size_t current_line = 0;
-        err = log_service_print_file_from_line(LOG_SERVICE_BACKUP_FILE_PATH, start_line, &current_line);
+        err = log_service_print_file_from_offset(LOG_SERVICE_BACKUP_FILE_PATH, 0);
         if (err == ESP_OK)
         {
-            err = log_service_print_file_from_line(LOG_SERVICE_FILE_PATH, start_line, &current_line);
+            err = log_service_print_file_from_offset(LOG_SERVICE_FILE_PATH, 0);
+        }
+    }
+    else
+    {
+        size_t requested_lines = (size_t)line_count;
+        long current_start = 0;
+        size_t current_lines = 0;
+        err = log_service_find_tail_start(LOG_SERVICE_FILE_PATH, requested_lines, &current_start, &current_lines);
+
+        if (err == ESP_OK && current_lines >= requested_lines)
+        {
+            err = log_service_print_file_from_offset(LOG_SERVICE_FILE_PATH, current_start);
+        }
+        else if (err == ESP_OK)
+        {
+            long backup_start = 0;
+            size_t backup_lines = 0;
+            size_t remaining_lines = requested_lines - current_lines;
+            err = log_service_find_tail_start(LOG_SERVICE_BACKUP_FILE_PATH, remaining_lines, &backup_start, &backup_lines);
+            if (err == ESP_OK)
+            {
+                err = log_service_print_file_from_offset(LOG_SERVICE_BACKUP_FILE_PATH, backup_start);
+            }
+            if (err == ESP_OK)
+            {
+                err = log_service_print_file_from_offset(LOG_SERVICE_FILE_PATH, 0);
+            }
         }
     }
 
